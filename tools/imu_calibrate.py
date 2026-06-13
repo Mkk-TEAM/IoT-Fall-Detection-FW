@@ -23,8 +23,8 @@ def mean_angle_deg(samples):
     return math.degrees(math.atan2(radians_sum_sin, radians_sum_cos))
 
 
-def read_json_line(ser):
-    while True:
+def read_json_line(ser, deadline):
+    while time.monotonic() < deadline:
         line = ser.readline().decode("utf-8", errors="ignore").strip()
         if not line or not line.startswith("{"):
             continue
@@ -36,6 +36,8 @@ def read_json_line(ser):
 
         if "roll" in data and "pitch" in data and "yaw" in data:
             return data
+
+    return None
 
 
 def main():
@@ -55,12 +57,18 @@ def main():
         default="tools/imu_calibration.json",
         help="Output JSON file",
     )
+    parser.add_argument(
+        "--min-samples",
+        type=int,
+        default=20,
+        help="Fail calibration if fewer samples are received",
+    )
     args = parser.parse_args()
 
     print("Place the IMU still on a flat surface before calibration starts.")
     print(f"Opening {args.port} at {args.baud} baud...")
 
-    ser = serial.Serial(args.port, baudrate=args.baud, timeout=1)
+    ser = serial.Serial(args.port, baudrate=args.baud, timeout=0.2)
     roll_samples = []
     pitch_samples = []
     yaw_samples = []
@@ -69,21 +77,30 @@ def main():
     az_samples = []
 
     try:
-        warmup_deadline = time.time() + 2.0
-        while time.time() < warmup_deadline:
-            read_json_line(ser)
+        warmup_deadline = time.monotonic() + 2.0
+        while time.monotonic() < warmup_deadline:
+            read_json_line(ser, warmup_deadline)
 
         print(f"Collecting samples for {args.seconds:.1f} seconds...")
-        deadline = time.time() + args.seconds
+        deadline = time.monotonic() + args.seconds
 
-        while time.time() < deadline:
-            data = read_json_line(ser)
+        while time.monotonic() < deadline:
+            data = read_json_line(ser, deadline)
+            if data is None:
+                break
             roll_samples.append(float(data["roll"]))
             pitch_samples.append(float(data["pitch"]))
             yaw_samples.append(float(data["yaw"]))
             ax_samples.append(float(data.get("ax", 0.0)))
             ay_samples.append(float(data.get("ay", 0.0)))
             az_samples.append(float(data.get("az", 0.0)))
+
+        if len(roll_samples) < args.min_samples:
+            raise RuntimeError(
+                f"Only {len(roll_samples)} IMU samples received; "
+                f"need at least {args.min_samples}. Build with "
+                "IMU_SERIAL_DEBUG=1 and verify the WT61PC connection."
+            )
 
         calibration = {
             "created_at_epoch": time.time(),
